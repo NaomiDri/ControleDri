@@ -650,6 +650,18 @@ a.btn.prim{color:#fff}
 .ficha.viagem.volta{border-left-color:var(--ouro);border-left-style:solid;background:linear-gradient(90deg,color-mix(in srgb,var(--ouro) 18%,transparent),color-mix(in srgb,var(--ouro) 5%,transparent));color:color-mix(in srgb,var(--ouro) 70%,var(--tinta))}
 .ficha.viagem.estadia{background:color-mix(in srgb,var(--tinta-3) 9%,transparent);border-left-color:color-mix(in srgb,var(--marca) 35%,transparent);color:var(--tinta-2);font-weight:500}
 .fase-viagem{color:var(--marca)}
+/* dias com conselheiros federais viajando: faixa verde no alto e selo com o número de pessoas */
+.dia.com-cons{background-image:linear-gradient(180deg,color-mix(in srgb,var(--ok) 13%,transparent),transparent 45%)}
+.cons-dia{display:inline-flex;align-items:center;gap:3px;padding:0 6px;border-radius:99px;background:var(--ok-s);color:var(--ok);font-weight:700;font-size:.95em;line-height:1.5}
+.cons-dia svg{width:12px;height:12px}
+.dia .cons-dia{margin-left:auto}
+.quem-locais{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.quem-linha{grid-template-columns:minmax(0,1fr);gap:2px;text-align:left}
+.quem-linha>*{min-width:0;width:100%}
+.quem-nome{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.quem-nome .quem-sol{margin-left:auto}
+.sep-dia.quem-cons{color:var(--ok)}
+.quem-aviso{color:var(--alerta)}
 
 /* ---------- lembretes ---------- */
 .cartao{border-radius:var(--raio);border:0;box-shadow:var(--sombra);transition-property:transform,box-shadow;transition-duration:.22s;transition-timing-function:var(--ease)}
@@ -1148,11 +1160,44 @@ function confirmar({titulo, texto = '', html = '', ok = 'Confirmar', perigo = fa
 const _isoBR = s => { const m = /(\d{2})\/(\d{2})\/(\d{4})/.exec(s || ''); return m ? `${m[3]}-${m[2]}-${m[1]}` : ''; };
 const _horaDe = s => (/(\d{2}:\d{2})/.exec(s || '') || [])[1] || '';
 const cidadeCurta = s => String(s || '').replace(/\s*-\s*[A-Z]{2}\s*$/, '').trim();
+/* Datas digitadas erradas no SISPAD (vistas em 23/11/2026): ano errado (volta em 06/11/2029 numa reunião de 2026),
+   mês errado (volta em 13/12 numa reunião de junho). Regras, nesta ordem:
+   1. data mais de 60 dias depois da ida: troca o ano pelo da ida; se ainda não fizer sentido, ignora a data;
+   2. período maior que 15 dias e deslocamento de volta mais de 3 dias depois do fim do evento ou da volta da ficha: vale o fim da ficha;
+   3. período ainda maior que 15 dias e com passagem aérea: valem as datas dos voos (o que foi emitido).
+   Toda data ajustada fica registrada em "obs", e a janela do dia mostra o que está no SISPAD. */
+const _diasEntre = (a, b) => Math.round((deISO(b) - deISO(a)) / 864e5);
+function _anoCerto(ida, x) {
+  if (!ida || !x || x <= somaDias(ida, 60)) return x || '';
+  const y = ida.slice(0, 4) + x.slice(4);
+  return y >= ida && y <= somaDias(ida, 60) ? y : '';
+}
+const _periodos = new WeakMap();
 function periodoViagem(v) {
-  const ida = _isoBR(v.deslocamento_ida) || v.data_ida || v.data_inicio_evento || '';
-  let volta = _isoBR(v.deslocamento_volta) || v.data_volta || v.data_fim_evento || ida;
+  if (_periodos.has(v)) return _periodos.get(v);
+  const obs = [];
+  let ida = _isoBR(v.deslocamento_ida) || v.data_ida || v.data_inicio_evento || '';
+  const fimFicha = [v.data_volta, v.data_fim_evento].map(x => _anoCerto(ida, x || '')).filter(Boolean).sort().pop() || ida;
+  const voltaSispad = _isoBR(v.deslocamento_volta) || v.data_volta || v.data_fim_evento || '';
+  let volta = _anoCerto(ida, _isoBR(v.deslocamento_volta));
+  if (!volta || (volta > somaDias(fimFicha, 3) && _diasEntre(ida, volta) > 15)) volta = fimFicha;
   if (volta < ida) volta = ida;
-  return {ida, volta, horaIda: _horaDe(v.deslocamento_ida) || hm(v.hora_ida), horaVolta: _horaDe(v.deslocamento_volta) || hm(v.hora_volta)};
+  if (ida && _diasEntre(ida, volta) > 15) {
+    const voos = (v.passagens || []).filter(p => !/cancel/i.test(p.situacao || '')).map(p => _isoBR(p.embarque)).filter(Boolean).sort();
+    if (voos.length) {
+      const ultimo = voos[voos.length - 1];
+      ida = voos[0];
+      volta = fimFicha >= ultimo && fimFicha <= somaDias(ultimo, 3) ? fimFicha : ultimo;
+      obs.push('datas pelos voos emitidos');
+    } else obs.push(`período de ${_diasEntre(ida, volta) + 1} dias no SISPAD, confira`);
+  }
+  if (voltaSispad && voltaSispad !== volta) obs.unshift(`no SISPAD a volta consta em ${dataBR(voltaSispad)}`);
+  const idaSispad = _isoBR(v.deslocamento_ida) || v.data_ida || v.data_inicio_evento || '';
+  if (idaSispad && idaSispad !== ida) obs.unshift(`no SISPAD a ida consta em ${dataBR(idaSispad)}`);
+  const p = {ida, volta, horaIda: ida === idaSispad ? _horaDe(v.deslocamento_ida) || hm(v.hora_ida) : '',
+    horaVolta: volta === voltaSispad ? _horaDe(v.deslocamento_volta) || hm(v.hora_volta) : '', obs: obs.join('; ')};
+  _periodos.set(v, p);
+  return p;
 }
 function faseViagem(v, iso) {
   const p = periodoViagem(v), o = cidadeCurta(v.origem), d = cidadeCurta(v.destino || v.titulo_evento);
@@ -1164,6 +1209,44 @@ function faseViagem(v, iso) {
   return {tipo: 'estadia', texto: `Em ${d}`};
 }
 const viagensNoDia = iso => E.viagens.filter(v => { const p = periodoViagem(v); return p.ida && p.ida <= iso && p.volta >= iso && !/cancel/i.test(v.situacao_solicitacao || ''); });
+/* Conselheiros federais no dia (os retirados pelo administrador ficam de fora, como na tela Viagens). */
+function conselheirosNoDia(iso) {
+  const fora = excluidosSispad();
+  return E.viagensTodas.filter(v => { if (v.grupo !== 'conselheiro_federal' || fora.has(v.id_pessoa_sispad)) return false; const p = periodoViagem(v); return p.ida && p.ida <= iso && p.volta >= iso && !/cancel/i.test(v.situacao_solicitacao || ''); });
+}
+const chavePessoa = v => v.id_pessoa_sispad || normal(v.beneficiario) || 'presidente';
+const nPessoas = l => new Set(l.map(chavePessoa)).size;
+/* Onde a pessoa termina o dia: na volta, na cidade de origem; nos outros dias, no destino. */
+function localNoDia(v, iso) {
+  const o = cidadeCurta(v.origem), d = cidadeCurta(v.destino || v.titulo_evento);
+  return (faseViagem(v, iso).tipo === 'volta' ? o || d : d) || 'local não informado';
+}
+function linhaQuemViaja(v, iso, varias = 1) {
+  const fs = faseViagem(v, iso), cons = v.grupo === 'conselheiro_federal', pes = cons ? pessoaSispad(v.id_pessoa_sispad) : null;
+  const voos = (v.passagens || []).filter(p => _isoBR(p.embarque) === iso && !/cancel/i.test(p.situacao || ''));
+  return `<div class="linha clic quem-linha" data-acao="ver-viagem" data-id="${v.id}">
+    <div class="quem-nome"><b>${esc(v.beneficiario || (cons ? '' : 'Presidente'))}</b>${cons ? `<span class="etq ${pes && pes.na_lista_oficial ? 'marca' : 'alerta'}">${esc(rotuloPapel(pes) || 'conselheiro federal')}</span>` : '<span class="etq ok">Presidente</span>'}<span class="etq quem-sol">${esc(v.codigo_solicitacao)}</span></div>
+    <div class="fase-viagem trecho">${fs.tipo === 'estadia' ? '' : ic('aviao')}${esc(fs.texto)}${fs.hora ? ' · ' + esc(fs.hora) : ''}</div>
+    ${voos.map(p => `<div class="peq trecho">${ic('aviao')}Voo ${esc(p.trecho || '')}${_horaDe(p.embarque) ? ' às ' + esc(_horaDe(p.embarque)) : ''}${p.cia ? ' · ' + esc(p.cia) : ''}${p.localizador ? ` <span class="etq">${esc(p.localizador)}</span>` : ''}</div>`).join('')}
+    <div class="peq suave reticencias">${esc(v.titulo_evento || '')}</div>
+    <div class="d trecho peq">${esc(v.origem || 'origem não informada')} ${ic('setad')} ${esc(v.destino || 'destino não informado')}</div>
+    ${(o => o ? `<div class="peq quem-aviso">Datas ajustadas: ${esc(o)}.</div>` : '')(periodoViagem(v).obs)}
+    ${varias > 1 ? `<div class="peq quem-aviso">${varias} viagens desta pessoa neste dia no SISPAD.</div>` : ''}</div>`;
+}
+function blocoQuemViaja(iso) {
+  const pres = viagensNoDia(iso), cons = conselheirosNoDia(iso), todos = [...pres, ...cons];
+  if (!todos.length) return '<div class="suave">Ninguém viajando neste dia.</div>';
+  const locais = {};
+  todos.forEach(v => { const l = localNoDia(v, iso); (locais[l] = locais[l] || new Set()).add(chavePessoa(v)); });
+  const ord = l => l.slice().sort((a, b) => localNoDia(a, iso).localeCompare(localNoDia(b, iso), 'pt') || String(a.beneficiario).localeCompare(String(b.beneficiario), 'pt'));
+  const n = nPessoas(todos), nc = nPessoas(cons), qtd = {};
+  todos.forEach(v => { qtd[chavePessoa(v)] = (qtd[chavePessoa(v)] || 0) + 1; });
+  const linha = v => linhaQuemViaja(v, iso, qtd[chavePessoa(v)]);
+  return `<h3 style="margin-top:4px">Quem está viajando: ${n} pessoa${n === 1 ? '' : 's'}</h3>
+    <div class="quem-locais"><span class="peq suave">Onde estão no fim do dia:</span>${Object.entries(locais).sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0], 'pt')).map(([l, s]) => `<span class="etq">${esc(l)}: ${s.size}</span>`).join('')}</div>
+    ${pres.length ? `<div class="sep-dia">Presidente</div><div>${pres.map(linha).join('')}</div>` : ''}
+    ${cons.length ? `<div class="sep-dia quem-cons">Conselheiros federais: ${nc} pessoa${nc === 1 ? '' : 's'}</div><div>${ord(cons).map(linha).join('')}</div>` : ''}`;
+}
 TELAS.inicio = {
   montar() {
     const d = new Date(), saud = d.getHours() < 12 ? 'Bom dia' : d.getHours() < 18 ? 'Boa tarde' : 'Boa noite';
@@ -1186,7 +1269,8 @@ TELAS.inicio = {
     const noPer = ativos.filter(l => l.data_evento >= f.de && l.data_evento <= ate);
     const viaPer = viagensDoInicio().lista;
     const ex = E.execucoes[0];
-    const r = $('#ini-resumo'); if (r) r.innerHTML = `<span>${ic('sino')}${noPer.length} lembrete${noPer.length === 1 ? '' : 's'}</span><span>${ic('aviao')}${viaPer.length} viage${viaPer.length === 1 ? 'm' : 'ns'}</span>${ex ? `<span title="Última leitura do SISPAD">${ic('robo')}SISPAD ${relDia(isoLocal(new Date(ex.finalizado_em || ex.iniciado_em)))} ${ex.status === 'ok' ? '' : `<span class="etq ${ex.status === 'erro' ? 'erro' : 'alerta'}">${ex.status === 'erro' ? 'com erro' : 'com avisos'}</span>`}</span>` : ''}`;
+    const temCons = dias.some(iso => conselheirosNoDia(iso).length);
+    const r = $('#ini-resumo'); if (r) r.innerHTML = `<span>${ic('sino')}${noPer.length} lembrete${noPer.length === 1 ? '' : 's'}</span><span>${ic('aviao')}${viaPer.length} viage${viaPer.length === 1 ? 'm' : 'ns'} do Presidente</span>${temCons ? `<span title="Número de conselheiros federais viajando no dia. Clique no dia para ver quem está viajando e onde está."><span class="cons-dia">${ic('usuarios')}conselheiros no dia</span></span>` : ''}${ex ? `<span title="Última leitura do SISPAD">${ic('robo')}SISPAD ${relDia(isoLocal(new Date(ex.finalizado_em || ex.iniciado_em)))} ${ex.status === 'ok' ? '' : `<span class="etq ${ex.status === 'erro' ? 'erro' : 'alerta'}">${ex.status === 'erro' ? 'com erro' : 'com avisos'}</span>`}</span>` : ''}`;
     const pt = $('#ini-per-txt'); if (pt) pt.textContent = (OPC.inicio.find(o => o[0] === f.preset) || [0, textoPeriodo(f.de, ate)])[1] === 'Escolher datas…' ? textoPeriodo(f.de, ate) : (OPC.inicio.find(o => o[0] === f.preset) || [0, textoPeriodo(f.de, ate)])[1];
     paginar('inicio', dias, iso => {
       const dd = deISO(iso), dow = dd.getDay(), lem = ativos.filter(l => l.data_evento === iso), via = viagensNoDia(iso), it = [
@@ -1194,8 +1278,9 @@ TELAS.inicio = {
         ...via.map(v => { const fs = faseViagem(v, iso); return `<div class="ficha viagem ${fs.tipo}" title="${esc(fs.texto + (fs.hora ? ' às ' + fs.hora : '') + ' · ' + (v.titulo_evento || ''))}">${fs.tipo === 'estadia' ? '' : '✈ '}${esc(fs.texto)}</div>`; })];
       const nReu = reunioesDoDia(iso).filter(ativa).length, nTar = E.agTar.filter(t => t.data === iso && !t.feito).length;
       if (nReu || nTar) it.unshift(`<div class="ficha reuniao">${nReu ? `${nReu} reuni${nReu === 1 ? 'ão' : 'ões'}` : ''}${nReu && nTar ? ' · ' : ''}${nTar ? `${nTar} a fazer` : ''}</div>`);
-      return `<button class="dia ${iso === hj ? 'hoje' : ''} ${iso < hj ? 'passado' : ''} ${dow === 0 || dow === 6 ? 'fds' : ''}" data-acao="ver-dia" data-iso="${iso}" aria-label="${dd.getDate()} de ${MESES_L[dd.getMonth()]}: ${lem.length} lembretes, ${via.length} viagens">
-        <div class="cab"><b>${dd.getDate()}</b>${iso === hj ? 'hoje' : SEMANA[dow]}${dd.getDate() === 1 || iso === dias[0] ? ' · ' + MESES[dd.getMonth()] : ''}</div>${it.join('')}<div class="mais oculto"></div></button>`;
+      const nCons = nPessoas(conselheirosNoDia(iso)), tCons = `${nCons} conselheiro${nCons === 1 ? '' : 's'} federa${nCons === 1 ? 'l' : 'is'} viajando`;
+      return `<button class="dia ${iso === hj ? 'hoje' : ''} ${iso < hj ? 'passado' : ''} ${dow === 0 || dow === 6 ? 'fds' : ''} ${nCons ? 'com-cons' : ''}" data-acao="ver-dia" data-iso="${iso}" aria-label="${dd.getDate()} de ${MESES_L[dd.getMonth()]}: ${lem.length} lembretes, ${via.length} viagens do Presidente${nCons ? ', ' + tCons : ''}">
+        <div class="cab"><b>${dd.getDate()}</b>${iso === hj ? 'hoje' : SEMANA[dow]}${dd.getDate() === 1 || iso === dias[0] ? ' · ' + MESES[dd.getMonth()] : ''}${nCons ? `<span class="cons-dia" title="${tCons}">${ic('usuarios')}${nCons}</span>` : ''}</div>${it.join('')}<div class="mais oculto"></div></button>`;
     }, '', area => {
       // em cada dia, esconde o que não cabe e mostra "+N"
       $$('.dia', area).forEach(d => {
@@ -1210,12 +1295,12 @@ TELAS.inicio = {
 function verDia(iso) {
   const lem = E.lembretes.filter(l => l.data_evento === iso), via = viagensNoDia(iso), dd = deISO(iso);
   const reus = reunioesDoDia(iso).sort((a, b) => (a.hora ? hm(a.hora) : '99' + String(a.ordem).padStart(4, '0')).localeCompare(b.hora ? hm(b.hora) : '99' + String(b.ordem).padStart(4, '0'))), tar = E.agTar.filter(t => t.data === iso);
-  abrirJanela({titulo: `${SEMANA_L[dd.getDay()]}, ${dd.getDate()} de ${MESES_L[dd.getMonth()]}`, sub: relDia(iso), larg: 640,
+  abrirJanela({titulo: `${SEMANA_L[dd.getDay()]}, ${dd.getDate()} de ${MESES_L[dd.getMonth()]}`, sub: relDia(iso), larg: 720,
     corpo: `<div class="caixa" style="padding:10px 12px;box-shadow:none;display:flex;flex-direction:column;gap:6px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h3>Agenda do dia</h3><button class="btn mini prim" data-acao="ag-abrir" data-iso="${iso}">${ic('agenda', 14)}Abrir agenda</button></div>
         ${reus.length ? reus.slice(0, 6).map(c => `<div class="peq" style="display:flex;gap:8px;align-items:center"><b style="width:44px">${c.hora ? hm(c.hora) : 'chegada'}</b><span class="reticencias" style="flex:1">${esc(c.pessoa)}${c.assunto ? ' — ' + esc(c.assunto) : ''}</span><span class="etq ${ST_REU[c.status][1]}">${ST_REU[c.status][0]}</span></div>`).join('') + (reus.length > 6 ? `<div class="peq suave">e mais ${reus.length - 6}…</div>` : '') : '<div class="peq suave">Nenhuma reunião marcada.</div>'}
         ${tar.length ? `<div class="peq suave">${tar.filter(t => !t.feito).length} a fazer, ${tar.filter(t => t.feito).length} feito(s)</div>` : ''}</div>
       ${lem.length ? lem.map(l => cartaoLembrete(l)).join('') : '<div class="suave">Nenhum lembrete neste dia.</div>'}
-      ${via.length ? `<h3 style="margin-top:4px">Viagens</h3>${via.map(v => `<div class="linha clic" style="grid-template-columns:minmax(0,1fr) auto;border-radius:10px;border-top:1px solid var(--linha)" data-acao="ver-viagem" data-id="${v.id}"><div>${(fs => `<div class="fase-viagem">${fs.tipo === 'estadia' ? '' : '✈ '}${esc(fs.texto)}${fs.hora ? ' · ' + esc(fs.hora) : ''}</div>`)(faseViagem(v, iso))}<div class="t reticencias">${esc(v.titulo_evento)}</div><div class="d trecho">${esc(v.origem || '—')} ${ic('setad')} ${esc(v.destino || '—')}</div></div><span class="etq marca">${esc(v.codigo_solicitacao)}</span></div>`).join('')}` : ''}`,
+      ${blocoQuemViaja(iso)}`,
     rodape: `<button class="btn" data-acao="fechar">Fechar</button><button class="btn prim" data-acao="novo-lembrete" data-data="${iso}">${ic('mais')}Novo lembrete neste dia</button>`});
 }
 
