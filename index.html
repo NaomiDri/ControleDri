@@ -662,6 +662,12 @@ a.btn.prim{color:#fff}
 .quem-nome .quem-sol{margin-left:auto}
 .sep-dia.quem-cons{color:var(--ok)}
 .quem-aviso{color:var(--alerta)}
+/* Viagens: período e pessoas dos totais; médias visíveis também no celular */
+.kpi-contexto{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:4px 16px;align-items:center;font-size:.86em;color:var(--tinta-2)}
+.kpi-contexto>span{display:inline-flex;align-items:center;gap:5px}
+.kpi-contexto svg{width:14px;height:14px;color:var(--marca)}
+.kpi .x.med{color:var(--tinta-2);font-weight:600;white-space:normal}
+@media (max-width:760px){.kpi .x.med{display:block;font-size:.74em}}
 
 /* ---------- lembretes ---------- */
 .cartao{border-radius:var(--raio);border:0;box-shadow:var(--sombra);transition-property:transform,box-shadow;transition-duration:.22s;transition-timing-function:var(--ease)}
@@ -2081,10 +2087,20 @@ TELAS.viagens = {
     const f = E.F.viagens, l = viagensFiltradas(), hj = hojeISO(), ex = E.execucoes[0], base = viagensDeQuem(), deCons = f.quem !== 'presidente';
     $('#via-sub').innerHTML = `${f.de || f.ate ? `Viagens ${textoPeriodo(f.de, f.ate)} · ` : ''}${deCons ? (f.quem === 'conselheiros' ? `Conselheiros federais (${new Set(base.map(v => v.id_pessoa_sispad)).size} pessoas) · ` : `${esc(rotuloPapel(pessoaSispad(f.quem.slice(2))))} · `) : ''}Lidas do SISPAD pelo robô${ex ? ` · última leitura ${dataHoraBR(ex.finalizado_em || ex.iniciado_em)} ${etqExec(ex.status)}` : ''}`;
     const prox = base.filter(v => (v.data_inicio_evento || '') >= hj).sort((a, b) => a.data_inicio_evento.localeCompare(b.data_inicio_evento))[0];
-    $('#via-kpis').innerHTML = `<div class="kpi"><div class="r">Viagens${f.de || f.ate ? ' no período' : ''}</div><div class="v">${l.length}</div><div class="x">${l.filter(v => (v.data_inicio_evento || '') >= hj).length} por acontecer</div></div>
+    // contexto dos totais: período, quantas pessoas e médias (por pessoa; com uma pessoa só, por viagem)
+    const nPes = nPessoas(l), umaPessoa = nPes === 1, divisor = umaPessoa ? l.length : nPes, porQuem = umaPessoa ? 'por viagem' : 'por pessoa';
+    const iniPer = f.de || l.map(v => periodoViagem(v).ida).filter(Boolean).sort()[0] || '';   // datas já corrigidas (seção 9.3.1)
+    const fimPer = f.ate || l.map(v => periodoViagem(v).volta).filter(Boolean).sort().pop() || '';
+    const totDesp = somaDespViagens(l), totPas = l.reduce((s, v) => s + (Number(v.valor_passagens) || 0), 0);
+    const qtdPas = l.reduce((s, v) => s + (v.passagens || []).filter(p => !/cancel/i.test(p.situacao || '')).length, 0);
+    const med = x => divisor ? x / divisor : 0, um = x => x.toLocaleString('pt-BR', {maximumFractionDigits: 1});
+    const pes1 = umaPessoa ? l[0] : null, papel1 = pes1 && pes1.grupo === 'conselheiro_federal' ? rotuloPapel(pessoaSispad(pes1.id_pessoa_sispad)) : 'Presidente';
+    $('#via-kpis').innerHTML = `<div class="kpi-contexto">${ic('cal')}<span><b>Período:</b> ${iniPer || fimPer ? esc(textoPeriodo(iniPer, fimPer)) + (f.de || f.ate ? '' : ' (todas as viagens)') : 'sem viagens'}</span>
+        <span>${ic('usuarios')}<b>${umaPessoa ? esc(pes1.beneficiario || 'Presidente') : `${nPes} pessoa${nPes === 1 ? '' : 's'}`}</b>${umaPessoa ? ` · ${esc(papel1)}` : ''}</span></div>
+      <div class="kpi"><div class="r">Viagens${f.de || f.ate ? ' no período' : ''}</div><div class="v">${l.length}</div><div class="x med">${nPes > 1 ? `${um(med(l.length))} por pessoa · ` : ''}${l.filter(v => (v.data_inicio_evento || '') >= hj).length} por acontecer</div></div>
       <div class="kpi"><div class="r">Próxima viagem</div><div class="v">${prox ? dataBR(prox.data_inicio_evento).slice(0, 5) : '—'}</div><div class="x">${prox ? esc((deCons && f.quem === 'conselheiros' ? (prox.beneficiario || '').split(' ')[0] + ' · ' : '') + (prox.destino || prox.titulo_evento)) : 'nenhuma'}</div></div>
-      <div class="kpi"><div class="r">Despesas (processo)</div><div class="v">${moeda(somaDespViagens(l))}</div><div class="x">diárias, AT, MD, DT, jeton${l.some(v => !temProcesso(v)) ? ` · ${l.filter(v => !temProcesso(v)).length} ainda pela solicitação` : ''}</div></div>
-      <div class="kpi"><div class="r">Passagens aéreas</div><div class="v">${moeda(l.reduce((s, v) => s + (Number(v.valor_passagens) || 0), 0))}</div><div class="x">tarifas + taxas</div></div>`;
+      <div class="kpi"><div class="r">Despesas (processo)</div><div class="v">${moeda(totDesp)}</div><div class="x med">média ${moeda(med(totDesp))} ${porQuem}</div><div class="x">diárias, AT, MD, DT, jeton${l.some(v => !temProcesso(v)) ? ` · ${l.filter(v => !temProcesso(v)).length} ainda pela solicitação` : ''}</div></div>
+      <div class="kpi"><div class="r">Passagens aéreas</div><div class="v">${moeda(totPas)}</div><div class="x med">média ${moeda(med(totPas))} ${porQuem}</div><div class="x med">${qtdPas} passage${qtdPas === 1 ? 'm' : 'ns'} · ${um(med(qtdPas))} ${porQuem}</div><div class="x">tarifas + taxas</div></div>`;
     const nf = contarFiltros('viagens'); $('#via-nf').textContent = nf || ''; $('#via-nf').classList.toggle('oculto', !nf);
     paginar('viagens', l, v => `<div class="linha l-viagem clic" data-acao="ver-viagem" data-id="${v.id}" tabindex="0" role="button">
         <div><div class="t">${dataBR(v.data_inicio_evento).slice(0, 5)}<span class="suave peq">/${(v.data_inicio_evento || '').slice(2, 4)}</span></div>${v.data_fim_evento && v.data_fim_evento !== v.data_inicio_evento ? `<div class="d">até ${dataBR(v.data_fim_evento).slice(0, 5)}</div>` : ''}</div>
