@@ -868,6 +868,12 @@ const dataBR = iso => iso ? String(iso).slice(0, 10).split('-').reverse().join('
 const dataHoraBR = ts => { if (!ts) return ''; const d = new Date(ts); return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} às ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const horaBR = ts => { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const moeda = v => v == null || v === '' ? '—' : Number(v).toLocaleString('pt-BR', {style: 'currency', currency: 'BRL'});
+// Viagens: o valor que vale é o do PROCESSO (REQ), que é o que vai para pagamento; sem processo lido, usa a solicitação
+const temProcesso = v => v.processo_valor_total != null;
+const despViagem = v => temProcesso(v) ? (Number(v.processo_valor_total) || 0) : (Number(v.valor_total_despesas) || 0);
+const somaDespViagens = l => { const vistos = new Set(); return l.reduce((s, v) => {
+  if (temProcesso(v) && v.requisicao) { if (vistos.has(v.requisicao)) return s; vistos.add(v.requisicao); }   // processo com 2+ solicitações conta uma vez
+  return s + despViagem(v); }, 0); };
 const num = v => v == null ? '—' : Number(v).toLocaleString('pt-BR', {maximumFractionDigits: 2});
 const iniciais = n => (n || '?').split(/\s+/).filter(Boolean).slice(0, 2).map(p => p[0]).join('').toUpperCase();
 const normal = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
@@ -901,14 +907,14 @@ const csv = (cab, linhas) => [cab.map(csvCel).join(';'), ...linhas.map(l => l.ma
 /* ============================== Estado ============================== */
 const E = {
   eu: null, aba: 'inicio', subAdmin: 'atividades', horario: '',
-  lembretes: [], disparos: [], viagens: [], execucoes: [], usuarios: [], log: [], logFim: false, logPag: 0,
+  lembretes: [], disparos: [], viagens: [], viagensTodas: [], sispadPessoas: [], execucoes: [], usuarios: [], log: [], logFim: false, logPag: 0,
   carregadoDesde: null, pag: {},
   bt: null, btExec: null, btPos: null, btTokens: [], pt: null, ptImp: null, ptArqs: [],
   agComp: [], agTar: [], agDia: '', agPainel: 'horarios', agCfg: null, agMin: '',
   F: {
     inicio: {preset: '16', de: '', ate: ''},
     lembretes: {busca: '', preset: '', de: '', ate: '', situacao: 'ativos'},
-    viagens: {busca: '', preset: '', de: '', ate: '', situacao: '', ordem: 'asc'},
+    viagens: {busca: '', preset: '', de: '', ate: '', situacao: '', ordem: 'asc', quem: 'presidente'},
     log: {busca: '', preset: 'ult-7', de: '', ate: '', usuario: '', categoria: ''},
     bodytech: {busca: '', uf: '', cidade: '', mostrar: ''},
     personais: {busca: '', uf: '', academia: '', mostrar: '', termo: ''},
@@ -934,7 +940,7 @@ const OPC = {
   lembretes: [['', 'De hoje em diante'], ['hoje', 'Hoje'], ['7', 'Próximos 7 dias'], ['30', 'Próximos 30 dias'], ['mes', 'Este mês'], ['prox-mes', 'Próximo mês'], ['passados', 'Já passaram (90 dias)'], ['mes-ant', 'Mês passado'], ['ano', 'Este ano'], ['ano-ant', 'Ano passado'], ['custom', 'Escolher datas…']],
   log: [['hoje', 'Hoje'], ['ult-7', 'Últimos 7 dias'], ['ult-30', 'Últimos 30 dias'], ['ult-365', 'Último ano'], ['', 'Tudo'], ['custom', 'Escolher datas…']],
 };
-function opcViagens() { const anos = [...new Set(E.viagens.map(v => (v.data_inicio_evento || '').slice(0, 4)).filter(Boolean))].sort().reverse(); return [['', 'Todas'], ['futuro', 'Daqui para frente'], ['mes', 'Este mês'], ['prox-mes', 'Próximo mês'], ['mes-ant', 'Mês passado'], ['ult-365', 'Últimos 12 meses'], ...anos.map(a => ['ano:' + a, 'Ano ' + a]), ['custom', 'Escolher datas…']]; }
+function opcViagens() { const anos = [...new Set(viagensDeQuem().map(v => (v.data_inicio_evento || '').slice(0, 4)).filter(Boolean))].sort().reverse(); return [['', 'Todas'], ['futuro', 'Daqui para frente'], ['mes', 'Este mês'], ['prox-mes', 'Próximo mês'], ['mes-ant', 'Mês passado'], ['ult-365', 'Últimos 12 meses'], ...anos.map(a => ['ano:' + a, 'Ano ' + a]), ['custom', 'Escolher datas…']]; }
 function campoPeriodo(t, opcoes) {
   const f = E.F[t];
   return `<label class="campo"><span>Período</span><select class="ent" data-f="preset">${opcoes.map(([v, x]) => `<option value="${v}" ${f.preset === v ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
@@ -953,6 +959,7 @@ async function aplicarFiltro(t, campo, valor) {
   $$(`[data-filtro="${t}"] [data-f]`).forEach(el => { if (el !== document.activeElement || el.dataset.f !== 'busca') el.value = f[el.dataset.f] ?? ''; });
   if ((t === 'lembretes' || t === 'inicio') && f.de && (!E.carregadoDesde || f.de < E.carregadoDesde)) await carregarTudo();
   if (t === 'log') { await buscarLog(); }
+  if (t === 'viagens' && campo === 'quem') { f.situacao = ''; TELAS.viagens.montar(); }
   conteudoAtual();
 }
 let tBusca;
@@ -1087,7 +1094,7 @@ async function carregarTudo(silencioso) {
   try {
     const padrao = somaDias(hojeISO(), -90);
     const desde = [padrao, E.F.lembretes.de, E.F.inicio.de, E.agMin].filter(Boolean).sort()[0];
-    const [lem, disp, via, exe, comp, tar, cfg] = await Promise.all([
+    const [lem, disp, via, exe, comp, tar, cfg, pes] = await Promise.all([
       q(sb.from('lembretes').select('*').gte('data_evento', desde).order('data_evento').limit(10000)),
       q(sb.from('disparos').select('lembrete_id,dias_antes,data_ref,status,enviado_em').gte('data_ref', somaDias(hojeISO(), -60)).order('id', {ascending: false}).limit(3000)),
       q(sb.from('sispad_solicitacoes').select('*').order('data_inicio_evento', {ascending: false}).limit(10000)),
@@ -1095,8 +1102,11 @@ async function carregarTudo(silencioso) {
       q(sb.from('agenda_compromissos').select('*').gte('data', desde).order('data').limit(20000)),
       q(sb.from('agenda_tarefas').select('*').or(`feito.eq.false,data.gte.${desde}`).order('data').limit(20000)),
       rpc('agenda_config').catch(() => null),
+      sb.from('sispad_pessoas').select('*').order('nome').limit(2000).then(r => r.error ? [] : r.data, () => []),
     ]);
-    E.lembretes = lem; E.disparos = disp; E.viagens = via; E.execucoes = exe; E.carregadoDesde = desde;
+    E.lembretes = lem; E.disparos = disp; E.viagensTodas = via; E.sispadPessoas = pes || []; E.execucoes = exe; E.carregadoDesde = desde;
+    // Início, agenda e lembretes continuam só com as viagens do Presidente (conselheiros ficam na tela Viagens)
+    E.viagens = via.filter(v => v.grupo !== 'conselheiro_federal');
     E.agComp = comp; E.agTar = tar; if (cfg) E.agCfg = cfg;
     if (!E.horario) { try { E.horario = await rpc('horario_avisos'); } catch (e) {} }
   } catch (e) { if (!silencioso) toast(msgErro(e), 'erro'); if (/sessão expirou/.test(msgErro(e))) sair(); }
@@ -1569,7 +1579,8 @@ function lerFormLembrete() {
   err.textContent = m; err.classList.toggle('oculto', !m); return m ? null : v;
 }
 const ROTULOS = {pessoa: 'Pessoa(s)', assunto: 'Assunto', hora: 'Horário', duracao_min: 'Duração (min)', ordem: 'Ordem de chegada', local: 'Local', data: 'Data', texto: 'Texto', feito: 'Feito', observacao: 'Observação', titulo: 'Título', descricao: 'Descrição', telefone: 'Telefone', email: 'E-mail', data_evento: 'Data do evento', hora_evento: 'Hora', avisos: 'Avisos', status: 'Situação', nome: 'Nome', perfil: 'Perfil', ativo: 'Acesso ativo', valor: 'Valor',
-  situacao_solicitacao: 'Situação da solicitação', situacao_processo: 'Situação do processo', titulo_evento: 'Evento', data_inicio_evento: 'Início', data_fim_evento: 'Término', origem: 'Origem', destino: 'Destino', valor_total_despesas: 'Total das despesas', valor_passagens: 'Passagens', observacao: 'Observação', despesas: 'Lista de despesas', passagens: 'Lista de passagens', deslocamentos: 'Deslocamentos', centro_custo: 'Centro de custo', valor_diarias: 'Diárias (R$)', qtd_diarias: 'Diárias'};
+  situacao_solicitacao: 'Situação da solicitação', situacao_processo: 'Situação do processo', titulo_evento: 'Evento', data_inicio_evento: 'Início', data_fim_evento: 'Término', origem: 'Origem', destino: 'Destino', valor_total_despesas: 'Total das despesas', valor_passagens: 'Passagens', observacao: 'Observação', despesas: 'Lista de despesas', passagens: 'Lista de passagens', deslocamentos: 'Deslocamentos', centro_custo: 'Centro de custo', valor_diarias: 'Diárias (R$)', qtd_diarias: 'Diárias',
+  processo_valor_total: 'Total do processo (pago)', processo_data_pagamento: 'Pagamento do processo', processo_pago_em: 'Pago em', processo_situacao: 'Situação do processo (ficha)', processo_despesas: 'Despesas do processo', processo_valor_diarias: 'Diárias do processo (R$)', processo_qtd_diarias: 'Diárias do processo', processo_valor_at: 'AT do processo', processo_valor_dt: 'DT do processo', processo_valor_jeton: 'Jeton do processo', processo_sei: 'Nº processo SEI', processo_observacao: 'Observação do processo', processo_ida: 'Ida (processo)', processo_volta: 'Volta (processo)', processo_hospedagens: 'Hospedagens', processo_passagens: 'Passagens do processo', leitura_processo: 'Leitura do processo', registro_origem: 'Origem do registro'};
 const IGNORAR = ['status_em', 'feito_em', 'feito_por_nome', 'atualizado_em', 'atualizado_por', 'ultima_leitura_em', 'execucao_id', 'presente_ultima_extracao', 'primeira_leitura_em', 'leitura_ficha', 'criado_em', 'criado_por', 'criado_por_nome', 'id'];
 function fmtCampo(k, v) {
   if (v == null || v === '') return '(vazio)';
@@ -1925,13 +1936,38 @@ async function montarConsultaGeral(ExcelJS, viagens, titulo = '') {
 }
 
 /* ============================== VIAGENS ============================== */
+const pessoaSispad = id => E.sispadPessoas.find(p => p.id_pessoa_sispad === id);
+const excluidosSispad = () => new Set(E.sispadPessoas.filter(p => p.incluir === false).map(p => p.id_pessoa_sispad));
+function viagensDeQuem(quem = E.F.viagens.quem) {
+  if (quem === 'presidente') return E.viagens;
+  const fora = excluidosSispad(), cons = E.viagensTodas.filter(v => v.grupo === 'conselheiro_federal' && !fora.has(v.id_pessoa_sispad));
+  return quem === 'conselheiros' ? cons : cons.filter(v => v.id_pessoa_sispad === quem.slice(2));
+}
+function rotuloPapel(p) {
+  if (!p) return '';
+  if (p.na_lista_oficial) return p.papel_oficial || 'lista oficial';
+  return 'não consta na lista oficial';
+}
+function opcoesQuem() {
+  const f = E.F.viagens, cons = E.viagensTodas.filter(v => v.grupo === 'conselheiro_federal');
+  const cont = id => cons.filter(v => v.id_pessoa_sispad === id).length;
+  const fora = excluidosSispad();
+  const lista = E.sispadPessoas.filter(p => p.grupo === 'conselheiro_federal' && !fora.has(p.id_pessoa_sispad));
+  const grupo = (titulo, l) => l.length ? `<optgroup label="${titulo}">${l.map(p => `<option value="p:${esc(p.id_pessoa_sispad)}" ${f.quem === 'p:' + p.id_pessoa_sispad ? 'selected' : ''}>${esc(p.nome)} · ${cont(p.id_pessoa_sispad)}</option>`).join('')}</optgroup>` : '';
+  const ord = l => l.sort((a, b) => a.nome.localeCompare(b.nome));
+  return `<option value="presidente" ${f.quem === 'presidente' ? 'selected' : ''}>Presidente: Vinicius Marchese · ${E.viagens.length}</option>
+    <option value="conselheiros" ${f.quem === 'conselheiros' ? 'selected' : ''}>Conselheiros federais (todos) · ${viagensDeQuem('conselheiros').length}</option>
+    ${grupo('Titulares (lista oficial do Confea)', ord(lista.filter(p => p.na_lista_oficial && /^Titular/.test(p.papel_oficial || ''))))}
+    ${grupo('Suplentes (lista oficial do Confea)', ord(lista.filter(p => p.na_lista_oficial && /^Suplente/.test(p.papel_oficial || ''))))}
+    ${grupo('Só com cargo de conselheiro federal no SISPAD (não constam na lista oficial)', ord(lista.filter(p => !p.na_lista_oficial)))}`;
+}
 function viagensFiltradas() {
   const f = E.F.viagens, b = normal(f.busca);
-  return E.viagens.filter(v => {
+  return viagensDeQuem().filter(v => {
     const ini = v.data_inicio_evento || '', fim = v.data_fim_evento || ini;
     if (f.de && fim < f.de) return false; if (f.ate && ini > f.ate) return false;
     if (f.situacao && (v.situacao_processo || '') !== f.situacao) return false;
-    if (b && !normal([v.codigo_solicitacao, v.requisicao, v.titulo_evento, v.origem, v.destino, v.solicitante, v.localizador, v.centro_custo].join(' ')).includes(b)) return false;
+    if (b && !normal([v.codigo_solicitacao, v.requisicao, v.titulo_evento, v.origem, v.destino, v.solicitante, v.localizador, v.centro_custo, v.beneficiario, v.cargo].join(' ')).includes(b)) return false;
     return true;
   }).sort((x, y) => {                                   // padrão: mais antigas primeiro
     const k = v => `${v.data_inicio_evento || '9999-12-31'} ${v.hora_inicio_evento || '99:99'} ${v.codigo_solicitacao || ''}`;
@@ -1941,59 +1977,115 @@ function viagensFiltradas() {
 function ordemViagens() { E.F.viagens.ordem = E.F.viagens.ordem === 'desc' ? 'asc' : 'desc'; E.pag.viagens = 0; if (E.pagMeta) delete E.pagMeta.viagens; TELAS.viagens.montar(); conteudoAtual(); }
 const etqSit = s => `<span class="etq ${/finaliz/i.test(s) ? 'ok' : /cancel|negad/i.test(s) ? 'erro' : 'marca'}">${esc(s || '—')}</span>`;
 const etqExec = s => ({ok: '<span class="etq ok">concluída</span>', parcial: '<span class="etq alerta">com avisos</span>', erro: '<span class="etq erro">com erro</span>', executando: '<span class="etq marca">em andamento</span>'}[s] || '');
-const filtrosViagens = () => `${campoPeriodo('viagens', opcViagens())}<label class="campo"><span>Situação do processo</span><select class="ent" data-f="situacao"><option value="">Todas</option>${[...new Set(E.viagens.map(v => v.situacao_processo).filter(Boolean))].sort().map(s => `<option ${E.F.viagens.situacao === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></label>`;
+const filtrosViagens = () => `${campoPeriodo('viagens', opcViagens())}<label class="campo"><span>Situação do processo</span><select class="ent" data-f="situacao"><option value="">Todas</option>${[...new Set(viagensDeQuem().map(v => v.situacao_processo).filter(Boolean))].sort().map(s => `<option ${E.F.viagens.situacao === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></label>`;
 TELAS.viagens = {
   montar() {
     $('#principal').innerHTML = `
       <div class="topo"><div><h1>Viagens</h1><div class="sub" id="via-sub"></div></div>
-        <div class="acoes"><button class="btn" data-acao="ordem-viagens" title="Inverter a ordem das viagens">${ic(E.F.viagens.ordem === 'desc' ? 'baixo' : 'cima')}<span class="rotulo-longo">${E.F.viagens.ordem === 'desc' ? 'Mais recentes primeiro' : 'Mais antigas primeiro'}</span></button><button class="btn" data-acao="exportar-viagens" title="Baixar a Consulta Geral em Excel com todas as viagens, de todo o período">${ic('baixar')}<span class="rotulo-longo">Consulta Geral</span></button><button class="btn icone" data-acao="recarregar" title="Atualizar" aria-label="Atualizar">${ic('atualizar')}</button></div></div>
+        <div class="acoes"><button class="btn" data-acao="ordem-viagens" title="Inverter a ordem das viagens">${ic(E.F.viagens.ordem === 'desc' ? 'baixo' : 'cima')}<span class="rotulo-longo">${E.F.viagens.ordem === 'desc' ? 'Mais recentes primeiro' : 'Mais antigas primeiro'}</span></button><button class="btn" data-acao="lista-conselheiros" title="Quem é acompanhado como conselheiro federal e por quê">${ic('usuarios')}<span class="rotulo-longo">Conselheiros</span></button><button class="btn" data-acao="exportar-viagens" title="Baixar a Consulta Geral em Excel com todas as viagens, de todo o período">${ic('baixar')}<span class="rotulo-longo">Consulta Geral</span></button><button class="btn icone" data-acao="recarregar" title="Atualizar" aria-label="Atualizar">${ic('atualizar')}</button></div></div>
       <div class="kpis" id="via-kpis"></div>
       <div class="filtros" data-filtro="viagens">
-        <label class="busca campo"><span class="sr">Buscar</span>${ic('busca')}<input class="ent" data-f="busca" placeholder="Evento, destino, SOL/REQ, localizador…" value="${esc(E.F.viagens.busca)}"></label>
+        <label class="campo via-quem"><span>De quem</span><select class="ent" data-f="quem">${opcoesQuem()}</select></label>
+        <label class="busca campo"><span class="sr">Buscar</span>${ic('busca')}<input class="ent" data-f="busca" placeholder="${E.F.viagens.quem === 'presidente' ? 'Evento, destino, SOL/REQ, localizador…' : 'Nome, evento, destino, SOL/REQ, cargo…'}" value="${esc(E.F.viagens.busca)}"></label>
         <span class="f-extra" style="display:contents" id="via-fextra">${filtrosViagens()}</span>
         <button class="btn btn-filtros" data-acao="filtros" data-t="viagens">${ic('filtro')}Filtros<span class="etq marca" id="via-nf"></span></button>
       </div>
       ${areaPag('viagens', 'lista')}`;
   },
   conteudo() {
-    const f = E.F.viagens, l = viagensFiltradas(), hj = hojeISO(), ex = E.execucoes[0];
-    $('#via-sub').innerHTML = `${f.de || f.ate ? `Viagens ${textoPeriodo(f.de, f.ate)} · ` : ''}Lidas do SISPAD pelo robô${ex ? ` · última leitura ${dataHoraBR(ex.finalizado_em || ex.iniciado_em)} ${etqExec(ex.status)}` : ''}`;
-    const prox = E.viagens.filter(v => (v.data_inicio_evento || '') >= hj).sort((a, b) => a.data_inicio_evento.localeCompare(b.data_inicio_evento))[0];
+    const f = E.F.viagens, l = viagensFiltradas(), hj = hojeISO(), ex = E.execucoes[0], base = viagensDeQuem(), deCons = f.quem !== 'presidente';
+    $('#via-sub').innerHTML = `${f.de || f.ate ? `Viagens ${textoPeriodo(f.de, f.ate)} · ` : ''}${deCons ? (f.quem === 'conselheiros' ? `Conselheiros federais (${new Set(base.map(v => v.id_pessoa_sispad)).size} pessoas) · ` : `${esc(rotuloPapel(pessoaSispad(f.quem.slice(2))))} · `) : ''}Lidas do SISPAD pelo robô${ex ? ` · última leitura ${dataHoraBR(ex.finalizado_em || ex.iniciado_em)} ${etqExec(ex.status)}` : ''}`;
+    const prox = base.filter(v => (v.data_inicio_evento || '') >= hj).sort((a, b) => a.data_inicio_evento.localeCompare(b.data_inicio_evento))[0];
     $('#via-kpis').innerHTML = `<div class="kpi"><div class="r">Viagens${f.de || f.ate ? ' no período' : ''}</div><div class="v">${l.length}</div><div class="x">${l.filter(v => (v.data_inicio_evento || '') >= hj).length} por acontecer</div></div>
-      <div class="kpi"><div class="r">Próxima viagem</div><div class="v">${prox ? dataBR(prox.data_inicio_evento).slice(0, 5) : '—'}</div><div class="x">${prox ? esc(prox.destino || prox.titulo_evento) : 'nenhuma'}</div></div>
-      <div class="kpi"><div class="r">Despesas marcadas</div><div class="v">${moeda(l.reduce((s, v) => s + (Number(v.valor_total_despesas) || 0), 0))}</div><div class="x">diárias, AT, MD, DT, jeton</div></div>
+      <div class="kpi"><div class="r">Próxima viagem</div><div class="v">${prox ? dataBR(prox.data_inicio_evento).slice(0, 5) : '—'}</div><div class="x">${prox ? esc((deCons && f.quem === 'conselheiros' ? (prox.beneficiario || '').split(' ')[0] + ' · ' : '') + (prox.destino || prox.titulo_evento)) : 'nenhuma'}</div></div>
+      <div class="kpi"><div class="r">Despesas (processo)</div><div class="v">${moeda(somaDespViagens(l))}</div><div class="x">diárias, AT, MD, DT, jeton${l.some(v => !temProcesso(v)) ? ` · ${l.filter(v => !temProcesso(v)).length} ainda pela solicitação` : ''}</div></div>
       <div class="kpi"><div class="r">Passagens aéreas</div><div class="v">${moeda(l.reduce((s, v) => s + (Number(v.valor_passagens) || 0), 0))}</div><div class="x">tarifas + taxas</div></div>`;
     const nf = contarFiltros('viagens'); $('#via-nf').textContent = nf || ''; $('#via-nf').classList.toggle('oculto', !nf);
     paginar('viagens', l, v => `<div class="linha l-viagem clic" data-acao="ver-viagem" data-id="${v.id}" tabindex="0" role="button">
         <div><div class="t">${dataBR(v.data_inicio_evento).slice(0, 5)}<span class="suave peq">/${(v.data_inicio_evento || '').slice(2, 4)}</span></div>${v.data_fim_evento && v.data_fim_evento !== v.data_inicio_evento ? `<div class="d">até ${dataBR(v.data_fim_evento).slice(0, 5)}</div>` : ''}</div>
         <div><div class="t reticencias" title="${esc(v.titulo_evento)}">${esc(v.titulo_evento)}</div><div class="d trecho">${esc(v.origem || '—')} ${ic('setad')} ${esc(v.destino || '—')}${!v.presente_ultima_extracao ? ' <span class="etq alerta">não veio na última leitura</span>' : ''}${etqDT(v)}</div></div>
-        <div class="c-trecho d">${esc(v.solicitante || '')}</div>
+        <div class="c-trecho d">${deCons ? `<b>${esc(v.beneficiario || '')}</b>${v.cargo ? `<div class="peq suave">${esc(v.cargo)}</div>` : ''}` : esc(v.solicitante || '')}</div>
         <div class="c-sol"><div class="peq">${esc(v.codigo_solicitacao)}</div><div class="d">${esc(v.requisicao || '')}</div></div>
         <div class="c-sit">${etqSit(v.situacao_processo || v.situacao_solicitacao)}</div>
-        <div class="num">${moeda((Number(v.valor_total_despesas) || 0) + (Number(v.valor_passagens) || 0))}</div></div>`,
-      `<div class="vazio">${ic('aviao')}<div>${E.viagens.length ? 'Nenhuma viagem com esses filtros.' : 'Ainda não há viagens. Elas aparecem depois da primeira execução do robô do SISPAD (sispad_supabase.py).'}</div></div>`);
+        <div class="num">${moeda(despViagem(v) + (Number(v.valor_passagens) || 0))}${v.processo_pago_em ? `<div class="d">pago ${dataBR(v.processo_pago_em).slice(0, 5)}</div>` : ''}</div></div>`,
+      `<div class="vazio">${ic('aviao')}<div>${base.length ? 'Nenhuma viagem com esses filtros.' : deCons ? 'Ainda não há viagens de conselheiros federais. Elas aparecem depois que o banco for atualizado (supabase/08_conselheiros.sql) e o robô rodar.' : 'Ainda não há viagens. Elas aparecem depois da primeira execução do robô do SISPAD (sispad_supabase.py).'}</div></div>`);
   },
 };
 const etqDT = v => { const t = situacaoDT(v).tipo; return t === 'nao_marcado' ? ' <span class="etq alerta" title="' + DT_TEXTO.nao_marcado + '">DT não marcado</span>' : t === 'sem' ? ' <span class="etq erro" title="' + DT_TEXTO.sem + '">sem DT</span>' : ''; };
 function verViagem(id, aba = 'resumo') {
-  const v = E.viagens.find(x => x.id == id); if (!v) return;
+  const v = E.viagensTodas.find(x => x.id == id); if (!v) return;
+  const pes = v.grupo === 'conselheiro_federal' ? pessoaSispad(v.id_pessoa_sispad) : null;
   const par = (r, x) => x != null && String(x).trim() !== '' ? `<div><span>${r}</span><b>${esc(x)}</b></div>` : '';
   const desp = v.despesas || [], desl = v.deslocamentos || [], pas = v.passagens || [];
-  const abas = [['resumo', 'Resumo'], ['despesas', `Despesas (${desp.length})`], ['passagens', `Passagens (${pas.length})`], ...(v.observacao || v.descricao_evento ? [['obs', 'Observações']] : [])];
+  const pdesp = v.processo_despesas || [], phosp = v.processo_hospedagens || [], ppas = v.processo_passagens || [];
+  const abas = [['resumo', 'Resumo'], ...(temProcesso(v) || v.leitura_processo ? [['processo', 'Processo (pagamento)']] : []), ['despesas', `Despesas da solicitação (${desp.length})`], ['passagens', `Passagens (${pas.length})`], ...(v.observacao || v.descricao_evento || v.processo_observacao ? [['obs', 'Observações']] : [])];
+  const nq = x => x == null || x === '' ? '' : num(x);
   const corpo = {
-    resumo: `<div class="pares">${par('Beneficiário', v.beneficiario)}${par('Cargo', v.cargo)}${par('Início', `${dataBR(v.data_inicio_evento)} ${v.hora_inicio_evento || ''}`)}${par('Término', `${dataBR(v.data_fim_evento)} ${v.hora_fim_evento || ''}`)}
+    resumo: `<div class="pares">${par('Beneficiário', v.beneficiario)}${par(v.grupo === 'conselheiro_federal' ? 'Cargo nesta viagem (SISPAD)' : 'Cargo', v.cargo || (v.grupo === 'conselheiro_federal' ? 'não informado no SISPAD' : ''))}${pes ? par('Lista oficial do Confea', rotuloPapel(pes) + (pes.representacao ? `, ${pes.representacao}` : '')) : ''}${par('Início', `${dataBR(v.data_inicio_evento)} ${v.hora_inicio_evento || ''}`)}${par('Término', `${dataBR(v.data_fim_evento)} ${v.hora_fim_evento || ''}`)}
       ${par('Origem', v.origem)}${par('Destino', v.destino)}${par('Ida', `${dataBR(v.data_ida)} ${v.hora_ida || ''}`)}${par('Volta', `${dataBR(v.data_volta)} ${v.hora_volta || ''}`)}
       ${par('Solicitante', v.solicitante)}${par('Situação da solicitação', v.situacao_solicitacao)}${par('Situação do processo', v.situacao_processo)}${par('Centro de custo', v.centro_custo)}
-      ${par('Total das despesas', moeda(v.valor_total_despesas))}${par('Total das passagens', v.valor_passagens ? moeda(v.valor_passagens) : '')}</div>
+      ${temProcesso(v) ? `${par('Total do processo (pagamento)', moeda(v.processo_valor_total))}${par('Pagamento', v.processo_data_pagamento || 'ainda não pago')}${v.valor_total_despesas != null && Math.abs((Number(v.valor_total_despesas) || 0) - (Number(v.processo_valor_total) || 0)) > 0.009 ? par('Total na solicitação', moeda(v.valor_total_despesas) + ' (diferente do processo)') : ''}` : par('Total das despesas (solicitação)', moeda(v.valor_total_despesas))}${par('Total das passagens', v.valor_passagens ? moeda(v.valor_passagens) : '')}</div>
       ${(dt => DT_TEXTO[dt.tipo] ? `<div class="aviso ${dt.tipo === 'sem' ? 'erro' : 'alerta'}">${ic('info')}<div>${DT_TEXTO[dt.tipo]}${dt.tipo === 'nao_marcado' ? ` (${num(dt.km)} km, ${moeda(dt.valor)}).` : '.'}</div></div>` : '')(situacaoDT(v))}
-      ${desl.length ? `<div class="peq"><b>Deslocamento terrestre</b>${desl.map(d => `<div class="trecho">${esc(d.origem)} ${ic('setad')} ${esc(d.destino)} <span class="suave">(${num(d.km)} km)</span></div>`).join('')}</div>` : ''}`,
+      ${desl.length ? `<div class="peq"><b>Deslocamento terrestre</b>${desl.map(d => `<div class="trecho">${(d.origem || d.destino) ? `${esc(d.origem)} ${ic('setad')} ${esc(d.destino)} <span class="suave">(${num(d.km)} km)</span>` : `Trecho não informado no SISPAD <span class="suave">(${num(d.km)} km de DT pagos no processo)</span>`}${d.fonte && (d.origem || d.destino) ? ` <span class="suave">· fonte: ${esc(d.fonte)}</span>` : ''}</div>`).join('')}</div>` : ''}`,
     despesas: desp.length ? desp.map(d => `<div class="linha" style="grid-template-columns:minmax(0,1fr) auto auto;border-radius:8px;border-top:1px solid var(--linha)"><div><div class="peq">${esc(d.despesa)}</div>${d.centro_custo ? `<div class="d">${esc(d.centro_custo)}</div>` : ''}</div><div class="peq">${num(d.quantidade)} × </div><div style="text-align:right"><b>${moeda(d.valor_total)}</b><div>${d.marcada ? '<span class="etq ok">marcada</span>' : '<span class="etq">não marcada</span>'}</div></div></div>`).join('') + `<div class="pares">${par('Total marcado', moeda(v.valor_total_despesas))}${par('Total no relatório oficial', v.valor_total_oficial != null ? moeda(v.valor_total_oficial) : '')}</div>` : '<div class="suave">Sem despesas registradas.</div>',
-    passagens: pas.length ? pas.map(p => `<div class="linha" style="grid-template-columns:1fr;border-radius:8px;border-top:1px solid var(--linha)"><div class="trecho t">${esc(p.trecho)} <span class="etq">${esc(p.localizador)}</span></div><div class="d">Embarque ${esc(p.embarque)} · ${esc(p.cia)} · emitida em ${esc(p.emissao)}</div><div class="peq">Tarifa ${moeda(p.tarifa)} · taxa ${moeda(p.taxa_embarque)} · <b>total ${moeda(p.valor_total)}</b></div></div>`).join('') : '<div class="suave">Nenhuma passagem aérea vinculada.</div>',
-    obs: `${v.descricao_evento ? `<h3>Descrição do evento</h3><p class="peq" style="white-space:pre-line;margin:0">${esc(v.descricao_evento)}</p>` : ''}${v.observacao ? `<h3>Observação</h3><p class="peq" style="white-space:pre-line;margin:0">${esc(v.observacao)}</p>` : ''}`,
+    passagens: pas.length ? pas.map(p => `<div class="linha" style="grid-template-columns:1fr;border-radius:8px;border-top:1px solid var(--linha)"><div class="trecho t">${esc(p.trecho)} <span class="etq">${esc(p.localizador)}</span></div><div class="d">Embarque ${esc(p.embarque)} · ${esc(p.cia)} · emitida em ${esc(p.emissao)}</div><div class="peq">Tarifa ${moeda(p.tarifa)} · taxa ${moeda(p.taxa_embarque)} · <b>total ${moeda(p.valor_total)}</b>${p.situacao && !/emitid/i.test(p.situacao) ? ` <span class="etq ${/cancel/i.test(p.situacao) ? 'erro' : 'alerta'}">${esc(p.situacao)}</span>` : ''}${/cancel/i.test(p.situacao || '') ? ' <span class="suave">(fora do total de passagens)</span>' : ''}</div></div>`).join('') : '<div class="suave">Nenhuma passagem aérea vinculada.</div>',
+    processo: !temProcesso(v) ? `<div class="suave">${v.leitura_processo === 'SEM PROCESSO' ? 'Esta solicitação ainda não virou processo no SISPAD.' : 'O robô ainda não conseguiu ler o processo desta viagem.'}</div>` :
+      `<div class="pares">${par('Processo', v.requisicao)}${par('Situação', v.processo_situacao || v.situacao_processo)}${par('Pagamento', v.processo_data_pagamento || 'ainda não pago')}${par('Solicitações', v.processo_solicitacoes)}
+      ${par('Tipo de pessoa', v.processo_tipo_pessoa)}${par('Ida', v.processo_ida)}${par('Volta', v.processo_volta)}${par('Recibo', v.processo_tipo_recibo)}${par('Nº processo SEI', v.processo_sei)}${par('Prestação de contas', v.processo_prestacao_contas_em ? dataBR(v.processo_prestacao_contas_em) : '')}${par('Passagens', v.processo_situacao_passagens)}</div>
+      <h3>Despesas do processo</h3>${pdesp.length ? pdesp.map(d => `<div class="linha" style="grid-template-columns:minmax(0,1fr) auto auto;border-radius:8px;border-top:1px solid var(--linha)"><div class="peq">${esc(d.despesa)}${d.situacao ? ` <span class="etq">${esc(d.situacao)}</span>` : ''}${d.qtd_estorno || d.qtd_acrescimo ? `<div class="d">${d.qtd_estorno ? `estorno ${nq(d.qtd_estorno)}` : ''}${d.qtd_estorno && d.qtd_acrescimo ? ' · ' : ''}${d.qtd_acrescimo ? `acréscimo ${nq(d.qtd_acrescimo)}` : ''}</div>` : ''}</div><div class="peq">${nq(d.quantidade)} × ${moeda(d.valor_unitario)}</div><div style="text-align:right"><b>${moeda(d.valor_total)}</b></div></div>`).join('') + `<div class="pares">${par('Total do processo', moeda(v.processo_valor_total))}</div>` : '<div class="suave">Nenhuma despesa no processo.</div>'}
+      ${ppas.length ? `<h3>Passagens no processo</h3>${ppas.map(p => `<div class="peq trecho">${esc(p.trecho)} · ${esc(p.data)} <span class="etq">${esc(p.localizador || p.localizador_cia)}</span> <span class="suave">${esc(p.situacao)}${p.emissao ? `, emitida em ${esc(p.emissao)}` : ''}</span></div>`).join('')}` : ''}
+      ${phosp.length ? `<h3>Hospedagens</h3>${phosp.map(h => `<div class="peq">${esc(h.hotel)} · ${esc(h.checkin)} a ${esc(h.checkout)}${h.reserva ? ` · reserva ${esc(h.reserva)}` : ''}</div>`).join('')}` : ''}`,
+    obs: `${v.processo_observacao ? `<h3>Observação do processo</h3><p class="peq" style="white-space:pre-line;margin:0">${esc(v.processo_observacao)}</p>` : ''}${v.descricao_evento ? `<h3>Descrição do evento</h3><p class="peq" style="white-space:pre-line;margin:0">${esc(v.descricao_evento)}</p>` : ''}${v.observacao ? `<h3>Observação</h3><p class="peq" style="white-space:pre-line;margin:0">${esc(v.observacao)}</p>` : ''}`,
   };
   abrirJanela({titulo: v.titulo_evento || v.codigo_solicitacao, sub: `${esc(v.codigo_solicitacao)} · ${esc(v.requisicao || '')} · ${etqSit(v.situacao_processo)}`, larg: 720,
     corpo: `<div class="mini-abas">${abas.map(([k, t]) => `<button class="${k === aba ? 'ativo' : ''}" data-acao="viagem-aba" data-id="${v.id}" data-a="${k}">${t}</button>`).join('')}</div>${corpo[aba]}`,
     rodape: `<span class="peq suave esq">Lida em ${dataHoraBR(v.ultima_leitura_em)}</span>${ehAdmin() ? `<button class="btn" data-acao="historico" data-t="sispad_solicitacoes" data-id="${v.id}" data-titulo="${esc(v.codigo_solicitacao)}">${ic('relogio')}Histórico</button>` : ''}<button class="btn" data-acao="fechar">Fechar</button>`});
+}
+function listaConselheiros() {
+  const ps = E.sispadPessoas.filter(p => p.grupo === 'conselheiro_federal'), adm = ehAdmin();
+  const cont = id => E.viagensTodas.filter(v => v.id_pessoa_sispad === id).length;
+  const cargos = p => Object.entries(p.cargos_sispad || {}).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${esc(k)}: ${n}`).join(' · ');
+  const linha = p => `<div class="linha" style="grid-template-columns:minmax(0,1fr) auto;border-radius:8px;border-top:1px solid var(--linha)">
+      <div><div class="t">${esc(p.nome)} ${p.incluir === false ? '<span class="etq erro">retirado pelo administrador</span>' : ''}${p.acompanhado === false ? '<span class="etq alerta">fora da última leitura</span>' : ''}</div>
+        <div class="d">${p.na_lista_oficial ? `<span class="etq ok">lista oficial</span> ${esc(p.papel_oficial || '')}${p.representacao ? `, ${esc(p.representacao)}` : ''}${p.mandato ? ` · mandato ${esc(p.mandato)}` : ''}` : '<span class="etq alerta">não consta na lista oficial</span>'}
+          ${p.marcado_no_sispad ? ' <span class="etq marca">cargo de conselheiro federal no SISPAD</span>' : ' <span class="etq">sem cargo de conselheiro federal no SISPAD</span>'}</div>
+        ${p.correspondencia_nome && p.correspondencia_nome !== 'exata' ? `<div class="peq suave">Nome ligado ao site oficial por grafia ${esc(p.correspondencia_nome)}</div>` : ''}
+        <div class="peq suave">Cargos nas viagens (SISPAD): ${cargos(p) || '—'}${p.motivo_exclusao ? ` · motivo da retirada: ${esc(p.motivo_exclusao)}` : ''}</div></div>
+      <div style="text-align:right"><button class="btn mini" data-acao="via-quem" data-q="p:${esc(p.id_pessoa_sispad)}">${cont(p.id_pessoa_sispad)} viagens</button>
+        ${adm ? `<div style="margin-top:6px">${p.incluir === false ? `<button class="btn mini" data-acao="pessoa-incluir" data-id="${esc(p.id_pessoa_sispad)}" data-v="1">Incluir de novo</button>` : `<button class="btn fant mini" data-acao="pessoa-incluir" data-id="${esc(p.id_pessoa_sispad)}" data-v="0">Retirar</button>`}</div>` : ''}</div></div>`;
+  const ord = l => l.sort((a, b) => a.nome.localeCompare(b.nome));
+  const bloco = (titulo, l) => l.length ? `<h3>${titulo} (${l.length})</h3>${l.map(linha).join('')}` : '';
+  abrirJanela({titulo: 'Conselheiros federais acompanhados', larg: 820,
+    sub: 'Entram os titulares e suplentes da página oficial do Confea (Composição do Plenário) e quem o SISPAD registra com cargo de conselheiro federal em alguma viagem.',
+    corpo: ps.length ? `<p class="peq suave" style="margin-top:0">O cargo de cada viagem aparece exatamente como está no SISPAD. Atenção: o SISPAD nem sempre marca o cargo (há titulares com “Não informado” ou “CONSELHEIRO(A)”), por isso a lista oficial também é usada. Fonte oficial: <a href="https://www.confea.org.br/composicao-plenario" target="_blank" rel="noopener">confea.org.br/composicao-plenario</a>.</p>
+      ${bloco('Titulares (lista oficial)', ord(ps.filter(p => p.na_lista_oficial && /^Titular/.test(p.papel_oficial || ''))))}
+      ${bloco('Suplentes (lista oficial)', ord(ps.filter(p => p.na_lista_oficial && /^Suplente/.test(p.papel_oficial || ''))))}
+      ${bloco('Só pelo cargo no SISPAD (não constam na lista oficial)', ord(ps.filter(p => !p.na_lista_oficial)))}`
+      : '<div class="suave">A lista ainda não existe no banco. Rode supabase/08_conselheiros.sql no Supabase e aguarde a próxima execução do robô.</div>',
+    rodape: '<button class="btn" data-acao="fechar">Fechar</button>'});
+}
+async function definirInclusao(id, incluir) {
+  const p = pessoaSispad(id); if (!p) return;
+  let motivo = null;
+  if (!incluir) {
+    motivo = prompt(`Retirar ${p.nome} da lista de conselheiros federais acompanhados?\nAs viagens continuam guardadas, mas deixam de aparecer e de ser atualizadas.\n\nMotivo (opcional):`, '');
+    if (motivo === null) return;
+  } else if (!await confirmar({titulo: 'Incluir de novo?', texto: `${p.nome} volta a ser acompanhado(a) a partir da próxima execução do robô.`, ok: 'Incluir'})) return;
+  try { await rpc('admin_definir_inclusao_pessoa', {p_id: id, p_incluir: incluir, p_motivo: motivo}); toast(incluir ? 'Incluído de novo.' : 'Retirado da lista.'); await carregarTudo(); listaConselheiros(); conteudoAtual(); }
+  catch (e) { toast(msgErro(e), 'erro'); }
+}
+function textoTrechoTerrestre(v) {
+  return (v.deslocamentos || []).map(d => (d.origem || d.destino)
+    ? `${d.origem || ''} -> ${d.destino || ''}${d.km != null ? ` (${String(d.km).replace('.', ',')} km)` : ''}${d.fonte ? ` [fonte: ${d.fonte}]` : ''}`
+    : `Trecho não informado no SISPAD (${String(d.km ?? '').replace('.', ',')} km de DT pagos no processo)`).join('; ');
+}
+function exportarViagensCSV() {
+  const l = viagensFiltradas(), br = x => typeof x === 'number' ? String(x).replace('.', ',') : x;
+  baixarArquivo(`viagens_sispad_${E.F.viagens.quem === 'presidente' ? 'presidente' : 'conselheiros'}_${hojeISO()}.csv`, csv(['Beneficiário', 'Grupo', 'Cargo na viagem (SISPAD)', 'Lista oficial do Confea', 'Solicitação', 'Processo', 'Situação solicitação', 'Situação processo', 'Evento', 'Início', 'Término', 'Origem', 'Destino', 'Solicitante', 'Centro de custo', 'Diárias', 'Valor diárias', 'Valor AT', 'Valor jeton', 'Total despesas', 'Total oficial', 'Trecho aéreo', 'Trecho terrestre', 'Localizador', 'Valor passagens',
+    'Processo: total pago', 'Processo: pagamento', 'Processo: diárias', 'Processo: valor diárias', 'Processo: AT', 'Processo: DT', 'Processo: jeton', 'Processo: SEI', 'Processo: leitura'],
+    l.map(v => [v.beneficiario, v.grupo === 'conselheiro_federal' ? 'Conselheiro federal' : 'Presidente', v.cargo, v.grupo === 'conselheiro_federal' ? rotuloPapel(pessoaSispad(v.id_pessoa_sispad)) : '', v.codigo_solicitacao, v.requisicao, v.situacao_solicitacao, v.situacao_processo, v.titulo_evento, dataBR(v.data_inicio_evento), dataBR(v.data_fim_evento), v.origem, v.destino, v.solicitante, v.centro_custo, v.qtd_diarias, v.valor_diarias, v.valor_at, v.valor_jeton, v.valor_total_despesas, v.valor_total_oficial, v.trecho_aereo, textoTrechoTerrestre(v), v.localizador, v.valor_passagens,
+      v.processo_valor_total, v.processo_data_pagamento, v.processo_qtd_diarias, v.processo_valor_diarias, v.processo_valor_at, v.processo_valor_dt, v.processo_valor_jeton, v.processo_sei, v.leitura_processo].map(br))));
+  sb.rpc('registrar_evento', {p_acao: 'exportou', p_detalhes: {o_que: `a lista de viagens (${l.length} registros)`}}).then(() => {}, () => {});
 }
 let _excelJS = null;
 function carregarExcelJS() {
@@ -2022,7 +2114,7 @@ async function exportarConsultaGeral(lista, rotulo) {
 }
 /* A planilha sai sempre com TODAS as viagens que o robô já leu (todo o período), independentemente do filtro da tela. */
 function periodoTotal() { const ds = E.viagens.map(v => v.data_inicio_evento).filter(Boolean).sort(); return ds.length ? textoPeriodo(ds[0], ds[ds.length - 1]) : 'todas as viagens'; }
-function exportarViagens() { exportarConsultaGeral(E.viagens.slice(), periodoTotal()); }
+function exportarViagens() { if (E.F.viagens.quem && E.F.viagens.quem !== 'presidente') return exportarViagensCSV(); exportarConsultaGeral(E.viagens.slice(), periodoTotal()); }
 function viagensDoInicio() {
   const f = E.F.inicio; if (!f.de) [f.de, f.ate] = intervaloPreset('16');
   const ate = f.ate || somaDias(f.de, 30);
@@ -2770,7 +2862,7 @@ SUB.robo = {
     E.execucoes = await q(sb.from('sispad_execucoes').select('*').order('id', {ascending: false}).limit(200));
     $('#adm-acoes').innerHTML = '';
     const ok = E.execucoes.find(e => e.status === 'ok' || e.status === 'parcial'), atraso = !ok || (Date.now() - new Date(ok.finalizado_em || ok.iniciado_em)) > 36 * 3600000;
-    $('#adm-corpo').innerHTML = `<div class="aviso ${atraso ? 'alerta' : ''}" style="flex:none">${ic(atraso ? 'alerta' : 'info')}<div>${atraso ? '<b>O SISPAD não é lido com sucesso há mais de 36 horas.</b> ' : ''}O robô é o arquivo <b>sispad_supabase.py</b>, que roda no computador da DRI todos os dias às 07:30 (Agendador do Windows). Para atualizar agora, dê PLAY nele.</div></div>${areaPag('robo', 'lista')}`;
+    $('#adm-corpo').innerHTML = `<div class="aviso ${atraso ? 'alerta' : ''}" style="flex:none">${ic(atraso ? 'alerta' : 'info')}<div>${atraso ? '<b>O SISPAD não é lido com sucesso há mais de 36 horas.</b> ' : ''}O robô é o arquivo <b>sispad_supabase.py</b>, que roda no computador da DRI todos os dias às 06h, 13h, 19h e 00h (Agendador do Windows). Para atualizar agora, dê PLAY nele.</div></div>${areaPag('robo', 'lista')}`;
   },
   conteudo() {
     const dur = e => e.finalizado_em ? Math.max(1, Math.round((new Date(e.finalizado_em) - new Date(e.iniciado_em)) / 60000)) + ' min' : '—';
@@ -2890,7 +2982,7 @@ const ACOES = {
   'status-lembrete': d => mudarStatus(d.id, d.s),
   'historico-lembrete': d => { const l = E.lembretes.find(x => x.id == d.id); abrirHistorico('lembretes', d.id, l && l.titulo); },
   'historico': d => abrirHistorico(d.t, d.id, d.titulo), 'restaurar': d => restaurar(d.v, d.e),
-  'ver-viagem': d => verViagem(d.id), 'viagem-aba': d => verViagem(d.id, d.a), 'exportar-viagens': exportarViagens, 'baixar-excel-inicio': baixarExcelInicio, 'ordem-viagens': ordemViagens, 'exportar-lembretes': exportarLembretes,
+  'ver-viagem': d => verViagem(d.id), 'lista-conselheiros': () => listaConselheiros(), 'pessoa-incluir': d => definirInclusao(d.id, d.v === '1'), 'via-quem': d => { E.F.viagens.quem = d.q; E.F.viagens.situacao = ''; E.pag.viagens = 0; fecharJanela(); TELAS.viagens.montar(); conteudoAtual(); }, 'viagem-aba': d => verViagem(d.id, d.a), 'exportar-viagens': exportarViagens, 'baixar-excel-inicio': baixarExcelInicio, 'ordem-viagens': ordemViagens, 'exportar-lembretes': exportarLembretes,
   'sub-admin': d => { E.subAdmin = d.s; TELAS.admin.montar(); }, 'mais-log': async () => { await buscarLog(true); SUB.atividades.conteudo(); }, 'exportar-log': exportarLog, 'ver-atividade': d => verAtividade(d.id),
   'novo-usuario': novoUsuario, 'editar-usuario': d => editarUsuario(d.id), 'salvar-usuario': (d, b) => salvarUsuario(d.id, b),
   'gerar-senha': d => { const i = d.alvo ? $('#' + d.alvo) : $('#form-usuario [name=senha]'); i.value = gerarSenha(); i.select(); },
