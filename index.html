@@ -1258,7 +1258,7 @@ TELAS.inicio = {
     const d = new Date(), saud = d.getHours() < 12 ? 'Bom dia' : d.getHours() < 18 ? 'Boa tarde' : 'Boa noite';
     $('#principal').innerHTML = `
       <div class="topo"><div><h1>${saud}, ${esc(E.eu.nome.split(' ')[0])}</h1><div class="sub">${SEMANA_L[d.getDay()]}, ${d.getDate()} de ${MESES_L[d.getMonth()]} de ${d.getFullYear()}</div></div>
-        <div class="acoes"><button class="btn" data-acao="baixar-excel-inicio" title="Baixar em Excel todas as viagens, de todo o período, no formato da Consulta Geral do SISPAD">${ic('baixar')}<span class="rotulo-longo">Baixar Excel</span></button><button class="btn icone" data-acao="recarregar" title="Atualizar" aria-label="Atualizar">${ic('atualizar')}</button><button class="btn prim" data-acao="novo-lembrete">${ic('mais')}Novo<span class="rotulo-longo">&nbsp;lembrete</span></button></div></div>
+        <div class="acoes"><button class="btn" data-acao="baixar-excel-inicio" title="Baixar em Excel todas as viagens do Presidente e dos conselheiros federais, de todo o período, no formato da Consulta Geral do SISPAD, organizadas por pessoa e data">${ic('baixar')}<span class="rotulo-longo">Baixar Excel</span></button><button class="btn icone" data-acao="recarregar" title="Atualizar" aria-label="Atualizar">${ic('atualizar')}</button><button class="btn prim" data-acao="novo-lembrete">${ic('mais')}Novo<span class="rotulo-longo">&nbsp;lembrete</span></button></div></div>
       <div class="filtros" data-filtro="inicio">
         <span class="f-extra" style="display:contents">${campoPeriodo('inicio', OPC.inicio)}</span>
         <button class="btn btn-filtros" data-acao="filtros" data-t="inicio">${ic('cal')}<span id="ini-per-txt"></span></button>
@@ -1784,7 +1784,9 @@ const CG_EXTRAS = [   // ocultas: tudo o mais que o robô guarda
   ['DespesasCadastradasNaoMarcadas', 'despesas_nao_marcadas'], ['Localizadores', null], ['CiasAereas', null], ['SituacaoPassagens', null],
   ['Observacao', 'observacao'], ['CodigoInternoSISPAD', 'cod_sispad'], ['NoRelatorioOficial', 'no_relatorio_oficial'],
   ['VeioNaUltimaLeitura', 'presente_ultima_extracao'], ['LidoEm', 'ultima_leitura_em'],
+  ['Grupo', null], ['ListaOficialConfea', null],
 ];
+const CG_EXTRAS_VISIVEIS = ['Grupo', 'ListaOficialConfea'];   // aparecem logo depois das colunas da planilha do SISPAD
 const CG_SOMAS = ['Diarias', 'MD', 'ValorDT', 'ValorTotalPago', 'ValorTrechosTotal'];
 const CG_DATAS = ['DataCadastro', 'DataInicioEvento', 'DataFimEvento'];
 const CG_MOEDA = ['ValorVigente', 'ValorDiarias', 'ValorAT', 'ValorMD', 'ValorJeton', 'ValorComplemento', 'ValorDT', 'ValorTotalPago',
@@ -1923,6 +1925,8 @@ function linhaConsultaGeral(v) {
   r.Localizadores = pas.map(p => p.localizador).filter(Boolean).join(', ');
   r.CiasAereas = [...new Set(pas.map(p => p.cia).filter(Boolean))].join(', ');
   r.SituacaoPassagens = (v.passagens || []).map(p => `${p.localizador || ''} ${p.situacao || ''}`.trim()).filter(Boolean).join(', ');
+  r.Grupo = v.grupo === 'conselheiro_federal' ? 'Conselheiro federal' : 'Presidente';
+  r.ListaOficialConfea = v.grupo === 'conselheiro_federal' ? rotuloPapel(pessoaSispad(v.id_pessoa_sispad)) : 'Presidente';
   return r;
 }
 
@@ -1936,7 +1940,7 @@ const CG_CENTRO = ['Entidade', 'CodigoSolicitacao', 'Requisicao', 'Situacao', 'T
 const cgLimpo = x => typeof x === 'number' ? (isFinite(x) ? x : '') : x instanceof Date ? (isNaN(x) ? '' : x) : x != null && typeof x === 'object' ? JSON.stringify(x).slice(0, 32000) : typeof x === 'string' ? x.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '').replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '').slice(0, 32000) : x;
 async function montarConsultaGeral(ExcelJS, viagens, titulo = '') {
   const linhas = viagens.map(linhaConsultaGeral).map(l => { for (const k in l) l[k] = cgLimpo(l[k]); return l; });
-  const cols = [...CG_COLUNAS.map(([n, oc, w]) => ({n, oc: !!oc, w: CG_LARG[n] || w})), ...CG_EXTRAS.map(([n]) => ({n, oc: true, w: 20}))];
+  const cols = [...CG_COLUNAS.map(([n, oc, w]) => ({n, oc: !!oc, w: CG_LARG[n] || w})), ...CG_EXTRAS.map(([n]) => ({n, oc: !CG_EXTRAS_VISIVEIS.includes(n), w: n === 'ListaOficialConfea' ? 30 : 20}))];
   const AZUL = 'FF00509B', AZUL_ESC = 'FF00305E', OURO = 'FFBA9705', LISTRA = 'FFF2F7FC', LINHA = 'FFDFE5EC', TOT = 'FFE6F0FA', TINTA = 'FF161D24';
   const wb = new ExcelJS.Workbook();
   wb.creator = 'Painel DRI'; wb.created = new Date(); wb.title = titulo || 'Consulta Geral SISPAD';
@@ -2073,7 +2077,7 @@ TELAS.viagens = {
   montar() {
     $('#principal').innerHTML = `
       <div class="topo"><div><h1>Viagens</h1><div class="sub" id="via-sub"></div></div>
-        <div class="acoes"><button class="btn" data-acao="ordem-viagens" title="Inverter a ordem das viagens">${ic(E.F.viagens.ordem === 'desc' ? 'baixo' : 'cima')}<span class="rotulo-longo">${E.F.viagens.ordem === 'desc' ? 'Mais recentes primeiro' : 'Mais antigas primeiro'}</span></button><button class="btn" data-acao="lista-conselheiros" title="Quem é acompanhado como conselheiro federal e por quê">${ic('usuarios')}<span class="rotulo-longo">Conselheiros</span></button><button class="btn" data-acao="exportar-viagens" title="Baixar a Consulta Geral em Excel com todas as viagens, de todo o período">${ic('baixar')}<span class="rotulo-longo">Consulta Geral</span></button><button class="btn icone" data-acao="recarregar" title="Atualizar" aria-label="Atualizar">${ic('atualizar')}</button></div></div>
+        <div class="acoes"><button class="btn" data-acao="ordem-viagens" title="Inverter a ordem das viagens">${ic(E.F.viagens.ordem === 'desc' ? 'baixo' : 'cima')}<span class="rotulo-longo">${E.F.viagens.ordem === 'desc' ? 'Mais recentes primeiro' : 'Mais antigas primeiro'}</span></button><button class="btn" data-acao="lista-conselheiros" title="Quem é acompanhado como conselheiro federal e por quê">${ic('usuarios')}<span class="rotulo-longo">Conselheiros</span></button><button class="btn" data-acao="exportar-viagens" title="Baixar a Consulta Geral em Excel com todas as viagens de quem está escolhido em &quot;De quem&quot;, de todo o período, organizadas por pessoa e data">${ic('baixar')}<span class="rotulo-longo">Consulta Geral</span></button><button class="btn" data-acao="exportar-viagens-csv" title="Baixar em CSV só as viagens que aparecem na lista, com os filtros aplicados">${ic('lista')}<span class="rotulo-longo">CSV</span></button><button class="btn icone" data-acao="recarregar" title="Atualizar" aria-label="Atualizar">${ic('atualizar')}</button></div></div>
       <div class="kpis" id="via-kpis"></div>
       <div class="filtros" data-filtro="viagens">
         <label class="campo via-quem"><span>De quem</span><select class="ent" data-f="quem">${opcoesQuem()}</select></label>
@@ -2198,30 +2202,43 @@ function carregarExcelJS() {
     document.head.appendChild(s);
   }));
 }
-async function exportarConsultaGeral(lista, rotulo) {
+/* Ordem da planilha: Presidente primeiro, depois os conselheiros por nome; as viagens de cada pessoa pela data. */
+function ordenarParaExcel(lista) {
+  const k = v => `${v.grupo === 'conselheiro_federal' ? 1 : 0}|${normal(v.beneficiario || '')}|${v.data_inicio_evento || '9999-12-31'} ${v.hora_inicio_evento || '99:99'}|${v.codigo_solicitacao || ''}`;
+  return lista.slice().sort((a, b) => k(a).localeCompare(k(b)));
+}
+/* Viagens que vão para a planilha: 'todos' = Presidente + conselheiros acompanhados; senão, a escolha "De quem" da tela Viagens. */
+function viagensParaExcel(quem) {
+  return quem === 'todos' ? [...E.viagens, ...viagensDeQuem('conselheiros')] : viagensDeQuem(quem).slice();
+}
+async function exportarConsultaGeral(lista, rotulo, sufixo = '') {
   if (!lista.length) return toast('Nenhuma viagem para exportar nesse período.', 'erro');
   toast('Gerando a planilha…');
   try {
     const ExcelJS = await carregarExcelJS();
-    const ord = lista.slice().sort((a, b) => `${a.data_inicio_evento} ${a.hora_inicio_evento || ''}`.localeCompare(`${b.data_inicio_evento} ${b.hora_inicio_evento || ''}`));
-    const {wb} = await montarConsultaGeral(ExcelJS, ord, rotulo);
+    const {wb} = await montarConsultaGeral(ExcelJS, ordenarParaExcel(lista), rotulo);
     const buf = await wb.xlsx.writeBuffer();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([buf], {type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
-    a.download = `CONSULTA_GERAL_SISPAD_${hojeISO()}.xlsx`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    a.download = `CONSULTA_GERAL_SISPAD_${sufixo ? sufixo + '_' : ''}${hojeISO()}.xlsx`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
     toast(`Planilha gerada com ${lista.length} viage${lista.length === 1 ? 'm' : 'ns'}.`);
     sb.rpc('registrar_evento', {p_acao: 'exportou', p_detalhes: {o_que: `a Consulta Geral de viagens (${lista.length} registros${rotulo ? ', ' + rotulo : ''})`}}).then(() => {}, () => {});
   } catch (e) { toast('Não consegui gerar a planilha: ' + (e.message || e), 'erro'); }
 }
 /* A planilha sai sempre com TODAS as viagens que o robô já leu (todo o período), independentemente do filtro da tela. */
-function periodoTotal() { const ds = E.viagens.map(v => v.data_inicio_evento).filter(Boolean).sort(); return ds.length ? textoPeriodo(ds[0], ds[ds.length - 1]) : 'todas as viagens'; }
-function exportarViagens() { if (E.F.viagens.quem && E.F.viagens.quem !== 'presidente') return exportarViagensCSV(); exportarConsultaGeral(E.viagens.slice(), periodoTotal()); }
+function periodoTotal(l = E.viagens) { const ds = l.map(v => v.data_inicio_evento).filter(Boolean).sort(); return ds.length ? textoPeriodo(ds[0], ds[ds.length - 1]) : 'todas as viagens'; }
+function exportarViagens() {
+  const quem = E.F.viagens.quem || 'presidente', l = viagensParaExcel(quem);
+  const nome = quem === 'presidente' ? 'Presidente' : quem === 'conselheiros' ? 'Conselheiros federais' : (l[0] && l[0].beneficiario) || 'Conselheiro federal';
+  const suf = quem === 'presidente' ? 'PRESIDENTE' : quem === 'conselheiros' ? 'CONSELHEIROS' : normal(nome).toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+  exportarConsultaGeral(l, `${nome} · ${periodoTotal(l)}`, suf);
+}
 function viagensDoInicio() {
   const f = E.F.inicio; if (!f.de) [f.de, f.ate] = intervaloPreset('16');
   const ate = f.ate || somaDias(f.de, 30);
   return {lista: E.viagens.filter(v => { const p = periodoViagem(v); return p.ida && p.ida <= ate && p.volta >= f.de && !/cancel/i.test(v.situacao_solicitacao || ''); }), rotulo: textoPeriodo(f.de, ate)};
 }
-function baixarExcelInicio() { exportarConsultaGeral(E.viagens.slice(), periodoTotal()); }
+function baixarExcelInicio() { const l = viagensParaExcel('todos'); exportarConsultaGeral(l, `Presidente e conselheiros federais · ${periodoTotal(l)}`, 'PRESIDENTE_E_CONSELHEIROS'); }
 function exportarLembretes() {
   const l = lembretesFiltrados();
   baixarArquivo(`lembretes_${hojeISO()}.csv`, csv(['Título', 'Descrição', 'Data', 'Hora', 'Telefone', 'E-mail', 'Avisos', 'Situação', 'Criado por', 'Criado em'], l.map(x => [x.titulo, x.descricao, dataBR(x.data_evento), (x.hora_evento || '').slice(0, 5), x.telefone, x.email, textoAvisos(x.avisos), x.status, x.criado_por_nome, dataHoraBR(x.criado_em)])));
@@ -3083,7 +3100,7 @@ const ACOES = {
   'status-lembrete': d => mudarStatus(d.id, d.s),
   'historico-lembrete': d => { const l = E.lembretes.find(x => x.id == d.id); abrirHistorico('lembretes', d.id, l && l.titulo); },
   'historico': d => abrirHistorico(d.t, d.id, d.titulo), 'restaurar': d => restaurar(d.v, d.e),
-  'ver-viagem': d => verViagem(d.id), 'lista-conselheiros': () => listaConselheiros(), 'pessoa-incluir': d => definirInclusao(d.id, d.v === '1'), 'via-quem': d => { E.F.viagens.quem = d.q; E.F.viagens.situacao = ''; E.pag.viagens = 0; fecharJanela(); TELAS.viagens.montar(); conteudoAtual(); }, 'viagem-aba': d => verViagem(d.id, d.a), 'exportar-viagens': exportarViagens, 'baixar-excel-inicio': baixarExcelInicio, 'ordem-viagens': ordemViagens, 'exportar-lembretes': exportarLembretes,
+  'ver-viagem': d => verViagem(d.id), 'lista-conselheiros': () => listaConselheiros(), 'pessoa-incluir': d => definirInclusao(d.id, d.v === '1'), 'via-quem': d => { E.F.viagens.quem = d.q; E.F.viagens.situacao = ''; E.pag.viagens = 0; fecharJanela(); TELAS.viagens.montar(); conteudoAtual(); }, 'viagem-aba': d => verViagem(d.id, d.a), 'exportar-viagens': exportarViagens, 'exportar-viagens-csv': exportarViagensCSV, 'baixar-excel-inicio': baixarExcelInicio, 'ordem-viagens': ordemViagens, 'exportar-lembretes': exportarLembretes,
   'sub-admin': d => { E.subAdmin = d.s; TELAS.admin.montar(); }, 'mais-log': async () => { await buscarLog(true); SUB.atividades.conteudo(); }, 'exportar-log': exportarLog, 'ver-atividade': d => verAtividade(d.id),
   'novo-usuario': novoUsuario, 'editar-usuario': d => editarUsuario(d.id), 'salvar-usuario': (d, b) => salvarUsuario(d.id, b),
   'gerar-senha': d => { const i = d.alvo ? $('#' + d.alvo) : $('#form-usuario [name=senha]'); i.value = gerarSenha(); i.select(); },
